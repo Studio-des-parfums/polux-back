@@ -1,8 +1,8 @@
 import cron from 'node-cron'
 import { RowDataPacket } from 'mysql2'
-import { pool } from '../db'
-import { sendDeadlineReminderEmail } from './email'
-import { getUserContacts } from '../utils/users'
+import { pool } from '../db.js'
+import { sendDeadlineReminderEmail } from './email.js'
+import { getUserContacts } from '../utils/users.js'
 
 type AlertType = 'day_before' | 'due_day'
 

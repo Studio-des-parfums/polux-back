@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express'
 import { RowDataPacket } from 'mysql2'
-import { sdpPool } from '../db'
+import { sdpPool } from '../db.js'
 
 export interface SdpUser {
   id: number

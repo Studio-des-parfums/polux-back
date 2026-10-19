@@ -1,6 +1,6 @@
 import cron from 'node-cron'
 import { RowDataPacket } from 'mysql2'
-import { pool } from '../db'
+import { pool } from '../db.js'
 
 // Toutes les 5 minutes : envoie les rappels dont l'échéance est passée en créant une
 // notification pour chaque assigné de la tâche (ou son créateur si personne n'est

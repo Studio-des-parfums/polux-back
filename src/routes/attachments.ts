@@ -1,8 +1,8 @@
 import { Router, Request, Response } from 'express'
 import multer from 'multer'
 import { RowDataPacket, ResultSetHeader } from 'mysql2'
-import { pool } from '../db'
-import { uploadTaskAttachment, deleteTaskAttachment, getTaskAttachmentUrl } from '../services/s3'
+import { pool } from '../db.js'
+import { uploadTaskAttachment, deleteTaskAttachment, getTaskAttachmentUrl } from '../services/s3.js'
 
 const router = Router()
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } })

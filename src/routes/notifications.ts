@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express'
 import { RowDataPacket } from 'mysql2'
-import { pool } from '../db'
+import { pool } from '../db.js'
 
 const router = Router()
 

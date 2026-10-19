@@ -1,9 +1,9 @@
 import { Router, Request, Response } from 'express'
 import { RowDataPacket, ResultSetHeader } from 'mysql2'
-import { pool } from '../db'
-import { getTaskAttachmentUrl } from '../services/s3'
-import { sendAssignedEmail, sendMentionEmail } from '../services/email'
-import { getUserContacts } from '../utils/users'
+import { pool } from '../db.js'
+import { getTaskAttachmentUrl } from '../services/s3.js'
+import { sendAssignedEmail, sendMentionEmail } from '../services/email.js'
+import { getUserContacts } from '../utils/users.js'
 
 const router = Router()
 

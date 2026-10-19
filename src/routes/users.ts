@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express'
 import { RowDataPacket } from 'mysql2'
-import { sdpPool } from '../db'
+import { sdpPool } from '../db.js'
 
 const router = Router()
 
