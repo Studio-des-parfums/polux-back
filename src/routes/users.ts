@@ -18,4 +18,12 @@ router.get('/users', async (_req: Request, res: Response) => {
   }
 })
 
+// Identité Polux de la personne connectée, déduite de son email sdp_dashboard (déjà
+// vérifié par requireUser) — utilisé côté front pour comparer son id à member_ids /
+// leads_access sans dupliquer la logique d'authentification.
+router.get('/users/me', async (req: Request, res: Response) => {
+  const { id, email, first_name, last_name } = req.sdpUser!
+  res.json({ id, email, first_name, last_name })
+})
+
 export default router

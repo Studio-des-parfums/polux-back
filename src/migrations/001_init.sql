@@ -32,7 +32,7 @@ CREATE TABLE projects (
 
 CREATE TABLE tasks (
   id INT AUTO_INCREMENT PRIMARY KEY,
-  project_id INT NOT NULL,
+  project_id INT NULL,
   team_id INT NOT NULL,
   title VARCHAR(255) NOT NULL,
   description TEXT,
@@ -43,7 +43,7 @@ CREATE TABLE tasks (
   deadline DATETIME NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+  FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
   FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE CASCADE,
   INDEX idx_tasks_assigned_to (assigned_to),
   INDEX idx_tasks_team_id (team_id),

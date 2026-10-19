@@ -2,28 +2,32 @@ import { Router, Request, Response } from 'express'
 import multer from 'multer'
 import { RowDataPacket, ResultSetHeader } from 'mysql2'
 import { pool } from '../db'
-import { uploadTaskAttachment, deleteTaskAttachment } from '../services/s3'
+import { uploadTaskAttachment, deleteTaskAttachment, getTaskAttachmentUrl } from '../services/s3'
 
 const router = Router()
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } })
 
-router.post('/tasks/:id/attachments', upload.single('file'), async (req: Request, res: Response) => {
+router.post('/tasks/:id/attachments', upload.array('files', 10), async (req: Request, res: Response) => {
   try {
-    const file = req.file
-    if (!file) {
+    const files = req.files as Express.Multer.File[] | undefined
+    if (!files || files.length === 0) {
       res.status(400).json({ error: 'Fichier requis' })
       return
     }
     const taskId = Number(req.params.id)
-    const { key, url } = await uploadTaskAttachment(taskId, file.buffer, file.originalname, file.mimetype)
-
-    const [result] = await pool.query<ResultSetHeader>(
-      `INSERT INTO task_attachments (task_id, filename, s3_key, url, content_type, size, uploaded_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [taskId, file.originalname, key, url, file.mimetype, file.size, req.sdpUser!.id]
-    )
-    const [rows] = await pool.query<RowDataPacket[]>('SELECT * FROM task_attachments WHERE id = ?', [result.insertId])
-    res.status(201).json(rows[0])
+    const created: RowDataPacket[] = []
+    for (const file of files) {
+      const { key } = await uploadTaskAttachment(taskId, file.buffer, file.originalname, file.mimetype)
+      const [result] = await pool.query<ResultSetHeader>(
+        `INSERT INTO task_attachments (task_id, filename, s3_key, content_type, size, uploaded_by)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [taskId, file.originalname, key, file.mimetype, file.size, req.sdpUser!.id]
+      )
+      const [rows] = await pool.query<RowDataPacket[]>('SELECT * FROM task_attachments WHERE id = ?', [result.insertId])
+      created.push(rows[0])
+    }
+    const withUrls = await Promise.all(created.map(async (a) => ({ ...a, url: await getTaskAttachmentUrl(a.s3_key) })))
+    res.status(201).json(withUrls)
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: "Erreur lors de l'envoi du fichier" })
