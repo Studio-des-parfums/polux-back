@@ -18,7 +18,7 @@ function slugify(name: string): string {
 // côté serveur (voir DELETE /teams/:id), pas affiché au client.
 router.get('/teams', async (_req: Request, res: Response) => {
   try {
-    const [teams] = await pool.query<RowDataPacket[]>('SELECT id, slug, name, color, is_official, created_at FROM teams ORDER BY name')
+    const [teams] = await pool.query<RowDataPacket[]>('SELECT id, slug, name, color, end_date, is_official, created_at FROM teams ORDER BY name')
     const [members] = await pool.query<RowDataPacket[]>('SELECT team_id, user_id FROM team_members')
     const result = teams.map((t) => ({
       ...t,
@@ -33,9 +33,13 @@ router.get('/teams', async (_req: Request, res: Response) => {
 
 router.post('/teams', async (req: Request, res: Response) => {
   try {
-    const { name, color } = req.body
+    const { name, color, end_date } = req.body
     if (!name || typeof name !== 'string') {
       res.status(400).json({ error: 'Le nom de l\'équipe est requis' })
+      return
+    }
+    if (!end_date) {
+      res.status(400).json({ error: 'La date de fin de l\'espace est requise' })
       return
     }
     const slug = slugify(name)
@@ -46,12 +50,12 @@ router.post('/teams', async (req: Request, res: Response) => {
 
     const creatorId = req.sdpUser!.id
     const [result] = await pool.query<ResultSetHeader>(
-      'INSERT INTO teams (slug, name, color, created_by) VALUES (?, ?, ?, ?)',
-      [slug, name.trim(), color || '#6366f1', creatorId]
+      'INSERT INTO teams (slug, name, color, end_date, created_by) VALUES (?, ?, ?, ?, ?)',
+      [slug, name.trim(), color || '#6366f1', end_date, creatorId]
     )
     await pool.query('INSERT IGNORE INTO team_members (team_id, user_id) VALUES (?, ?)', [result.insertId, creatorId])
 
-    const [rows] = await pool.query<RowDataPacket[]>('SELECT id, slug, name, color, is_official, created_at FROM teams WHERE id = ?', [result.insertId])
+    const [rows] = await pool.query<RowDataPacket[]>('SELECT id, slug, name, color, end_date, is_official, created_at FROM teams WHERE id = ?', [result.insertId])
     res.status(201).json({ ...rows[0], member_ids: [creatorId] })
   } catch (err: any) {
     if (err.code === 'ER_DUP_ENTRY') {
@@ -85,6 +89,28 @@ router.delete('/teams/:id/members/:userId', async (req: Request, res: Response) 
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: 'Erreur lors de la suppression du membre' })
+  }
+})
+
+// Permet de prolonger (ou modifier) la date de fin d'un espace créé à la volée.
+router.patch('/teams/:id', async (req: Request, res: Response) => {
+  try {
+    const { end_date } = req.body
+    if (end_date === undefined) {
+      res.status(400).json({ error: 'end_date requis' })
+      return
+    }
+    await pool.query('UPDATE teams SET end_date = ? WHERE id = ?', [end_date, req.params.id])
+    const [rows] = await pool.query<RowDataPacket[]>('SELECT id, slug, name, color, end_date, is_official, created_at FROM teams WHERE id = ?', [req.params.id])
+    if (!rows[0]) {
+      res.status(404).json({ error: 'Équipe introuvable' })
+      return
+    }
+    const [members] = await pool.query<RowDataPacket[]>('SELECT user_id FROM team_members WHERE team_id = ?', [req.params.id])
+    res.json({ ...rows[0], member_ids: members.map((m) => m.user_id) })
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: "Erreur lors de la mise à jour de l'équipe" })
   }
 })
 
