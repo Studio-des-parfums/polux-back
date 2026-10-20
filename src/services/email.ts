@@ -2,7 +2,7 @@ import { Resend } from 'resend'
 
 const FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'noreply@sdp-paris.com'
 const from = `Polux <${FROM_EMAIL}>`
-const APP_URL = process.env.POLUX_APP_URL || 'https://app.sdp-paris.com/project/polux'
+const APP_URL = process.env.POLUX_APP_URL || 'https://main.d1e2pr3r9i0qy0.amplifyapp.com/project/polux'
 
 // Charte du site (tailwind.config.js, tokens "indigo") : marron/beige chaud, pas de
 // violet/bleu générique — même teinte que le reste de sdp-dashboard.
