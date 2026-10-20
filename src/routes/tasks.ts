@@ -21,6 +21,7 @@ async function attachRelations(tasks: RowDataPacket[]) {
   const [reminders] = await pool.query<RowDataPacket[]>('SELECT * FROM task_reminders WHERE task_id IN (?)', [ids])
   const [attachments] = await pool.query<RowDataPacket[]>('SELECT * FROM task_attachments WHERE task_id IN (?)', [ids])
   const [comments] = await pool.query<RowDataPacket[]>('SELECT * FROM task_comments WHERE task_id IN (?) ORDER BY created_at', [ids])
+  const [checklist] = await pool.query<RowDataPacket[]>('SELECT * FROM task_checklist_items WHERE task_id IN (?) ORDER BY position, id', [ids])
   const [mentions] = comments.length
     ? await pool.query<RowDataPacket[]>('SELECT * FROM task_comment_mentions WHERE comment_id IN (?)', [comments.map((c) => c.id)])
     : [[] as RowDataPacket[]]
@@ -34,6 +35,7 @@ async function attachRelations(tasks: RowDataPacket[]) {
     assigned_to_ids: assignees.filter((a) => a.task_id === t.id).map((a) => a.user_id),
     reminders: reminders.filter((r) => r.task_id === t.id),
     attachments: attachmentsWithUrls.filter((a) => a.task_id === t.id),
+    checklist: checklist.filter((c) => c.task_id === t.id),
     comments: comments
       .filter((c) => c.task_id === t.id)
       .map((c) => ({
@@ -41,6 +43,20 @@ async function attachRelations(tasks: RowDataPacket[]) {
         mentioned_user_ids: mentions.filter((m) => m.comment_id === c.id).map((m) => m.mentioned_user_id),
       })),
   }))
+}
+
+// Si tous les items de la checklist d'une tâche sont cochés, elle passe automatiquement
+// en 'termine' ; si on décoche un item d'une tâche déjà terminée, elle repasse en 'en_cours'.
+async function syncTaskStatusWithChecklist(taskId: number) {
+  const [items] = await pool.query<RowDataPacket[]>('SELECT done FROM task_checklist_items WHERE task_id = ?', [taskId])
+  if (items.length === 0) return
+  const allDone = items.every((i) => i.done)
+  const [[task]] = await pool.query<RowDataPacket[]>('SELECT status FROM tasks WHERE id = ?', [taskId])
+  if (allDone && task.status !== 'termine') {
+    await pool.query('UPDATE tasks SET status = ? WHERE id = ?', ['termine', taskId])
+  } else if (!allDone && task.status === 'termine') {
+    await pool.query('UPDATE tasks SET status = ? WHERE id = ?', ['en_cours', taskId])
+  }
 }
 
 // Retourne les user_id nouvellement assignés (absents de l'ancienne liste), pour
@@ -215,6 +231,65 @@ router.post('/tasks/:id/comments', async (req: Request, res: Response) => {
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: "Erreur lors de l'ajout du commentaire" })
+  }
+})
+
+router.post('/tasks/:id/checklist', async (req: Request, res: Response) => {
+  try {
+    const { label } = req.body
+    if (!label || typeof label !== 'string') {
+      res.status(400).json({ error: 'label requis' })
+      return
+    }
+    const [[{ count }]] = await pool.query<RowDataPacket[]>(
+      'SELECT COUNT(*) AS count FROM task_checklist_items WHERE task_id = ?', [req.params.id]
+    )
+    const [result] = await pool.query<ResultSetHeader>(
+      'INSERT INTO task_checklist_items (task_id, label, position) VALUES (?, ?, ?)',
+      [req.params.id, label.trim(), count]
+    )
+    await syncTaskStatusWithChecklist(Number(req.params.id))
+    const [rows] = await pool.query<RowDataPacket[]>('SELECT * FROM task_checklist_items WHERE id = ?', [result.insertId])
+    res.status(201).json(rows[0])
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: "Erreur lors de l'ajout de l'item" })
+  }
+})
+
+router.put('/tasks/:id/checklist/:itemId', async (req: Request, res: Response) => {
+  try {
+    const { done, label } = req.body
+    const fields: string[] = []
+    const values: unknown[] = []
+    if (done !== undefined) { fields.push('done = ?'); values.push(!!done) }
+    if (label !== undefined) { fields.push('label = ?'); values.push(String(label).trim()) }
+    if (fields.length > 0) {
+      await pool.query(`UPDATE task_checklist_items SET ${fields.join(', ')} WHERE id = ? AND task_id = ?`, [...values, req.params.itemId, req.params.id])
+    }
+    await syncTaskStatusWithChecklist(Number(req.params.id))
+    const [rows] = await pool.query<RowDataPacket[]>('SELECT * FROM task_checklist_items WHERE id = ?', [req.params.itemId])
+    if (!rows[0]) {
+      res.status(404).json({ error: 'Item introuvable' })
+      return
+    }
+    const [[task]] = await pool.query<RowDataPacket[]>('SELECT * FROM tasks WHERE id = ?', [req.params.id])
+    res.json({ item: rows[0], task_status: task.status })
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: "Erreur lors de la mise à jour de l'item" })
+  }
+})
+
+router.delete('/tasks/:id/checklist/:itemId', async (req: Request, res: Response) => {
+  try {
+    await pool.query('DELETE FROM task_checklist_items WHERE id = ? AND task_id = ?', [req.params.itemId, req.params.id])
+    await syncTaskStatusWithChecklist(Number(req.params.id))
+    const [[task]] = await pool.query<RowDataPacket[]>('SELECT * FROM tasks WHERE id = ?', [req.params.id])
+    res.json({ success: true, task_status: task.status })
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: "Erreur lors de la suppression de l'item" })
   }
 })
 
