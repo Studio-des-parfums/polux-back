@@ -1,5 +1,6 @@
 import 'dotenv/config'
 import express from 'express'
+import { createServer } from 'http'
 import cors from 'cors'
 import { requireUser } from './middleware/requireUser.js'
 import teamRoutes from './routes/teams.js'
@@ -10,6 +11,8 @@ import userRoutes from './routes/users.js'
 import leadRoutes from './routes/leads.js'
 import { startReminderCron } from './services/reminders.js'
 import { startDeadlineAlertCron } from './services/deadlineAlerts.js'
+import { startNotificationCleanupCron } from './services/notify.js'
+import { initSocket } from './services/socket.js'
 
 const app = express()
 const PORT = Number(process.env.PORT) || 3002
@@ -33,7 +36,11 @@ app.use('/api', leadRoutes)
 
 startReminderCron()
 startDeadlineAlertCron()
+startNotificationCleanupCron()
 
-app.listen(PORT, () => {
+const httpServer = createServer(app)
+initSocket(httpServer)
+
+httpServer.listen(PORT, () => {
   console.log(`polux-back running on http://localhost:${PORT}`)
 })

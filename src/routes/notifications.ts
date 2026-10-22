@@ -10,7 +10,7 @@ router.get('/notifications', async (req: Request, res: Response) => {
       `SELECT n.*, t.title as task_title
        FROM task_notifications n
        JOIN tasks t ON t.id = n.task_id
-       WHERE n.recipient_user_id = ?
+       WHERE n.recipient_user_id = ? AND n.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
        ORDER BY n.created_at DESC
        LIMIT 50`,
       [req.sdpUser!.id]
@@ -25,7 +25,7 @@ router.get('/notifications', async (req: Request, res: Response) => {
 router.get('/notifications/unread-count', async (req: Request, res: Response) => {
   try {
     const [rows] = await pool.query<RowDataPacket[]>(
-      'SELECT COUNT(*) as count FROM task_notifications WHERE recipient_user_id = ? AND is_read = FALSE',
+      'SELECT COUNT(*) as count FROM task_notifications WHERE recipient_user_id = ? AND is_read = FALSE AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)',
       [req.sdpUser!.id]
     )
     res.json({ count: rows[0].count })

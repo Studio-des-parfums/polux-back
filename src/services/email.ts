@@ -34,83 +34,36 @@ function layout(title: string, bodyHtml: string): string {
   `
 }
 
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+// Email générique de notification Polux (assignation, équipe, statut, validation, mention…).
+export async function sendNotificationEmail(
+  to: string,
+  { subject, title, taskTitle, details }: { subject: string; title: string; taskTitle: string; details?: string }
+) {
+  const resend = getClient()
+  if (!resend) return
+  try {
+    await resend.emails.send({
+      from,
+      to,
+      subject,
+      html: layout(escapeHtml(title), `
+        <p style="color: #5D4C3F; font-size: 14px; line-height: 1.6;">${escapeHtml(subject)}</p>
+        ${taskLine(escapeHtml(taskTitle))}
+        ${details ? `<p style="color: #5D4C3F; font-size: 14px; line-height: 1.6; white-space: pre-wrap;">${escapeHtml(details)}</p>` : ''}
+      `),
+    })
+  } catch (err) {
+    console.error('sendNotificationEmail failed', err)
+  }
+}
+
 function taskLine(taskTitle: string): string {
   return `<div style="background: #F5F0EA; border: 1px solid #EAE2D9; border-left: 3px solid ${BRAND_LIGHT}; border-radius: 8px; padding: 14px 16px; margin: 16px 0;">
     <p style="color: #2B211B; font-size: 15px; font-weight: 600; margin: 0;">${taskTitle}</p>
   </div>`
 }
 
-export async function sendMentionEmail(to: string, fromName: string, taskTitle: string, commentBody: string) {
-  const resend = getClient()
-  if (!resend) return
-  try {
-    await resend.emails.send({
-      from,
-      to,
-      subject: `${fromName} vous a mentionné sur "${taskTitle}"`,
-      html: layout('Vous avez été mentionné', `
-        <p style="color: #5D4C3F; font-size: 14px; line-height: 1.6;"><strong style="color: #2B211B;">${fromName}</strong> vous a mentionné dans un commentaire :</p>
-        ${taskLine(taskTitle)}
-        <p style="color: #5D4C3F; font-size: 14px; line-height: 1.6; font-style: italic;">« ${commentBody} »</p>
-      `),
-    })
-  } catch (err) {
-    console.error('sendMentionEmail failed', err)
-  }
-}
-
-export async function sendAssignedEmail(to: string, fromName: string, taskTitle: string) {
-  const resend = getClient()
-  if (!resend) return
-  try {
-    await resend.emails.send({
-      from,
-      to,
-      subject: `${fromName} vous a assigné la tâche "${taskTitle}"`,
-      html: layout('Nouvelle tâche assignée', `
-        <p style="color: #5D4C3F; font-size: 14px; line-height: 1.6;"><strong style="color: #2B211B;">${fromName}</strong> vous a assigné :</p>
-        ${taskLine(taskTitle)}
-      `),
-    })
-  } catch (err) {
-    console.error('sendAssignedEmail failed', err)
-  }
-}
-
-export async function sendValidationRequestEmail(to: string, fromName: string, taskTitle: string) {
-  const resend = getClient()
-  if (!resend) return
-  try {
-    await resend.emails.send({
-      from,
-      to,
-      subject: `${fromName} demande la validation de "${taskTitle}"`,
-      html: layout('Validation demandée', `
-        <p style="color: #5D4C3F; font-size: 14px; line-height: 1.6;"><strong style="color: #2B211B;">${fromName}</strong> a terminé l'étape que vous lui avez confiée et attend votre validation :</p>
-        ${taskLine(taskTitle)}
-      `),
-    })
-  } catch (err) {
-    console.error('sendValidationRequestEmail failed', err)
-  }
-}
-
-export async function sendDeadlineReminderEmail(to: string, taskTitle: string, isToday: boolean) {
-  const resend = getClient()
-  if (!resend) return
-  try {
-    await resend.emails.send({
-      from,
-      to,
-      subject: isToday ? `Échéance aujourd'hui : "${taskTitle}"` : `Échéance demain : "${taskTitle}"`,
-      html: layout(isToday ? "L'échéance est aujourd'hui" : "L'échéance est demain", `
-        <p style="color: #5D4C3F; font-size: 14px; line-height: 1.6;">
-          ${isToday ? "Cette tâche arrive à échéance aujourd'hui :" : "Cette tâche arrive à échéance demain :"}
-        </p>
-        ${taskLine(taskTitle)}
-      `),
-    })
-  } catch (err) {
-    console.error('sendDeadlineReminderEmail failed', err)
-  }
-}

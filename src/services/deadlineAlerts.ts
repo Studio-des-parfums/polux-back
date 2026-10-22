@@ -1,8 +1,7 @@
 import cron from 'node-cron'
 import { RowDataPacket } from 'mysql2'
 import { pool } from '../db.js'
-import { sendDeadlineReminderEmail } from './email.js'
-import { getUserContacts } from '../utils/users.js'
+import { notify } from './notify.js'
 
 type AlertType = 'day_before' | 'due_day'
 
@@ -47,14 +46,11 @@ async function sendAlertsFor(type: AlertType) {
       continue
     }
 
-    const contacts = await getUserContacts(assignees.map((a) => a.user_id))
-    for (const contact of contacts) {
-      await sendDeadlineReminderEmail(contact.email, task.title, type === 'due_day')
-      await pool.query(
-        'INSERT INTO task_notifications (task_id, recipient_user_id, from_user_id) VALUES (?, ?, ?)',
-        [task.id, contact.id, contact.id]
-      )
-    }
+    await notify({
+      taskId: task.id, type: 'deadline', recipientIds: assignees.map((a) => a.user_id), fromUserId: null,
+      message: type === 'due_day' ? `Échéance aujourd'hui : « ${task.title} »` : `Échéance demain : « ${task.title} »`,
+      email: { title: type === 'due_day' ? "Échéance aujourd'hui" : 'Échéance demain', taskTitle: task.title },
+    })
     await pool.query('INSERT IGNORE INTO task_deadline_alerts_sent (task_id, alert_type) VALUES (?, ?)', [task.id, type])
   }
 

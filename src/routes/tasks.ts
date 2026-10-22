@@ -2,8 +2,7 @@ import { Router, Request, Response } from 'express'
 import { RowDataPacket, ResultSetHeader } from 'mysql2'
 import { pool } from '../db.js'
 import { getTaskAttachmentUrls } from '../services/s3.js'
-import { sendAssignedEmail, sendMentionEmail, sendValidationRequestEmail } from '../services/email.js'
-import { getUserContacts } from '../utils/users.js'
+import { notify, userName } from '../services/notify.js'
 
 const router = Router()
 
@@ -78,7 +77,7 @@ async function attachRelations(tasks: RowDataPacket[]) {
 
 // Si tous les items de la checklist d'une tâche sont cochés, elle passe automatiquement
 // en 'termine' ; si on décoche un item d'une tâche déjà terminée, elle repasse en 'en_cours'.
-async function syncTaskStatusWithChecklist(taskId: number) {
+async function syncTaskStatusWithChecklist(taskId: number, actorId: number | null = null) {
   const [items] = await pool.query<RowDataPacket[]>('SELECT done FROM task_checklist_items WHERE task_id = ?', [taskId])
   if (items.length === 0) return
   const allDone = items.every((i) => i.done)
@@ -87,10 +86,12 @@ async function syncTaskStatusWithChecklist(taskId: number) {
     const status = (await isDelegatedStep(taskId)) ? 'en_revision' : 'termine'
     if (task.status === status) return
     await pool.query('UPDATE tasks SET status = ? WHERE id = ?', [status, taskId])
-    await syncParentStep(taskId)
+    await notifyStatusChange(taskId, task.status, status, actorId)
+    await syncParentStep(taskId, actorId)
   } else if (!allDone && task.status === 'termine') {
     await pool.query('UPDATE tasks SET status = ? WHERE id = ?', ['en_cours', taskId])
-    await syncParentStep(taskId)
+    await notifyStatusChange(taskId, task.status, 'en_cours', actorId)
+    await syncParentStep(taskId, actorId)
   }
 }
 
@@ -101,27 +102,67 @@ async function isDelegatedStep(taskId: number): Promise<boolean> {
   return rows.length > 0
 }
 
-async function requestValidation(taskId: number, fromUserId: number) {
-  const [[task]] = await pool.query<RowDataPacket[]>('SELECT title, created_by FROM tasks WHERE id = ?', [taskId])
-  if (!task || task.created_by === fromUserId) return
-  await pool.query(
-    'INSERT INTO task_notifications (task_id, recipient_user_id, from_user_id) VALUES (?, ?, ?)',
-    [taskId, task.created_by, fromUserId]
-  )
-  const [[recipient], [author]] = await Promise.all([getUserContacts([task.created_by]), getUserContacts([fromUserId])])
-  if (recipient) await sendValidationRequestEmail(recipient.email, author ? `${author.first_name} ${author.last_name}` : 'Un collègue', task.title)
+const STATUS_LABEL: Record<string, string> = { a_faire: 'À faire', en_cours: 'En cours', en_revision: 'En révision', termine: 'Terminé' }
+
+// Changement de statut : prévient le créateur et les assignés (sauf l'auteur). Pour une étape
+// confiée : passage en révision = demande de validation au demandeur ; sa réponse (validée ou
+// refusée) est envoyée aux assignés.
+async function notifyStatusChange(taskId: number, previous: string, next: string, actorId: number | null) {
+  if (previous === next) return
+  const [[task]] = await pool.query<RowDataPacket[]>('SELECT title, created_by, owner_id FROM tasks WHERE id = ?', [taskId])
+  if (!task || task.owner_id) return
+  const [assignees] = await pool.query<RowDataPacket[]>('SELECT user_id FROM task_assignees WHERE task_id = ?', [taskId])
+  const assigneeIds = assignees.map((a) => a.user_id as number)
+  const actor = await userName(actorId)
+  const delegated = await isDelegatedStep(taskId)
+
+  if (delegated && next === 'en_revision') {
+    await notify({
+      taskId, type: 'validation_request', recipientIds: [task.created_by], fromUserId: actorId,
+      message: `${actor} a terminé l'étape « ${task.title} » et attend votre validation`,
+      email: { title: 'Validation demandée', taskTitle: task.title },
+    })
+    return
+  }
+  if (delegated && previous === 'en_revision' && actorId === task.created_by) {
+    const validated = next === 'termine'
+    await notify({
+      taskId, type: 'status_change', recipientIds: assigneeIds, fromUserId: actorId,
+      message: validated ? `${actor} a validé l'étape « ${task.title} »` : `${actor} a refusé l'étape « ${task.title} » (repassée en ${STATUS_LABEL[next]})`,
+      email: { title: validated ? 'Étape validée' : 'Étape refusée', taskTitle: task.title },
+    })
+    return
+  }
+  await notify({
+    taskId, type: 'status_change', recipientIds: [task.created_by, ...assigneeIds], fromUserId: actorId,
+    message: `${actor} a passé « ${task.title} » en ${STATUS_LABEL[next] ?? next}`,
+    email: { title: 'Changement de statut', taskTitle: task.title },
+  })
+}
+
+// Tâche confiée à toute une équipe (sans personne assignée) : chaque membre est prévenu.
+async function notifyTeamTask(taskId: number, taskTitle: string, teamId: number, authorId: number) {
+  const [[team]] = await pool.query<RowDataPacket[]>('SELECT name FROM teams WHERE id = ?', [teamId])
+  const [members] = await pool.query<RowDataPacket[]>('SELECT user_id FROM team_members WHERE team_id = ?', [teamId])
+  if (!team) return
+  const author = await userName(authorId)
+  await notify({
+    taskId, type: 'team_task', recipientIds: members.map((m) => m.user_id), fromUserId: authorId,
+    message: `${author} a confié « ${taskTitle} » à l'équipe ${team.name}`,
+    email: { title: 'Nouvelle tâche pour votre équipe', taskTitle },
+  })
 }
 
 // Si la tâche est une étape confiée depuis la checklist d'une autre tâche, l'étape est
 // cochée quand la tâche est terminée (décochée sinon), puis le statut du parent suit.
-async function syncParentStep(taskId: number) {
+async function syncParentStep(taskId: number, actorId: number | null = null) {
   const [[task]] = await pool.query<RowDataPacket[]>('SELECT status FROM tasks WHERE id = ?', [taskId])
   const [[step]] = await pool.query<RowDataPacket[]>('SELECT id, task_id, done FROM task_checklist_items WHERE linked_task_id = ?', [taskId])
   if (!task || !step) return
   const done = task.status === 'termine'
   if (!!step.done === done) return
   await pool.query('UPDATE task_checklist_items SET done = ? WHERE id = ?', [done, step.id])
-  await syncTaskStatusWithChecklist(step.task_id)
+  await syncTaskStatusWithChecklist(step.task_id, actorId)
 }
 
 // Crée, met à jour ou supprime la tâche liée à une étape selon l'assignation demandée.
@@ -137,7 +178,10 @@ async function assignChecklistItem(itemId: number, teamId: number | null, assign
     return
   }
   let linkedId: number = item.linked_task_id
+  let previousTeamId: number | null = null
   if (linkedId) {
+    const [[linked]] = await pool.query<RowDataPacket[]>('SELECT team_id FROM tasks WHERE id = ?', [linkedId])
+    previousTeamId = linked?.team_id ?? null
     await pool.query('UPDATE tasks SET team_id = ? WHERE id = ?', [teamId || null, linkedId])
   } else {
     const [[parent]] = await pool.query<RowDataPacket[]>('SELECT * FROM tasks WHERE id = ?', [item.task_id])
@@ -151,6 +195,7 @@ async function assignChecklistItem(itemId: number, teamId: number | null, assign
   }
   const newIds = await setAssignees(linkedId, assigneeIds)
   await notifyNewAssignees(linkedId, item.label, newIds, authorId)
+  if (teamId && assigneeIds.length === 0 && teamId !== previousTeamId) await notifyTeamTask(linkedId, item.label, teamId, authorId)
 }
 
 // Retourne les user_id nouvellement assignés (absents de l'ancienne liste), pour
@@ -168,16 +213,13 @@ async function setAssignees(taskId: number, userIds: number[]): Promise<number[]
 }
 
 async function notifyNewAssignees(taskId: number, taskTitle: string, newAssigneeIds: number[], authorId: number) {
-  const recipients = newAssigneeIds.filter((id) => id !== authorId)
-  if (recipients.length === 0) return
-  const [contacts, [author]] = await Promise.all([getUserContacts(recipients), getUserContacts([authorId])])
-  for (const contact of contacts) {
-    await pool.query(
-      'INSERT INTO task_notifications (task_id, recipient_user_id, from_user_id) VALUES (?, ?, ?)',
-      [taskId, contact.id, authorId]
-    )
-    await sendAssignedEmail(contact.email, author ? `${author.first_name} ${author.last_name}` : 'Un collègue', taskTitle)
-  }
+  if (newAssigneeIds.every((id) => id === authorId)) return
+  const author = await userName(authorId)
+  await notify({
+    taskId, type: 'assigned', recipientIds: newAssigneeIds, fromUserId: authorId,
+    message: `${author} vous a assigné « ${taskTitle} »`,
+    email: { title: 'Nouvelle tâche assignée', taskTitle },
+  })
 }
 
 // Visibilité des tâches (identique pour tous, admins compris) :
@@ -240,6 +282,8 @@ router.post('/tasks', async (req: Request, res: Response) => {
     if (Array.isArray(finalAssigneeIds) && finalAssigneeIds.length > 0) {
       const newIds = await setAssignees(result.insertId, finalAssigneeIds)
       await notifyNewAssignees(result.insertId, title.trim(), newIds, req.sdpUser!.id)
+    } else if (team_id) {
+      await notifyTeamTask(result.insertId, title.trim(), team_id, req.sdpUser!.id)
     }
     const [rows] = await pool.query<RowDataPacket[]>('SELECT * FROM tasks WHERE id = ?', [result.insertId])
     const [withRelations] = await attachRelations(rows)
@@ -255,14 +299,10 @@ const DATETIME_FIELDS = new Set(['start_date', 'deadline'])
 
 router.put('/tasks/:id', async (req: Request, res: Response) => {
   try {
+    const [[current]] = await pool.query<RowDataPacket[]>('SELECT created_by, status FROM tasks WHERE id = ?', [req.params.id])
     // Seul le demandeur peut terminer une étape confiée ; pour les autres, "terminé" = demande de validation.
-    let validationRequested = false
-    if (req.body.status === 'termine' && (await isDelegatedStep(Number(req.params.id)))) {
-      const [[current]] = await pool.query<RowDataPacket[]>('SELECT created_by, status FROM tasks WHERE id = ?', [req.params.id])
-      if (current && current.created_by !== req.sdpUser!.id) {
-        req.body.status = 'en_revision'
-        validationRequested = current.status !== 'en_revision'
-      }
+    if (req.body.status === 'termine' && current && current.created_by !== req.sdpUser!.id && (await isDelegatedStep(Number(req.params.id)))) {
+      req.body.status = 'en_revision'
     }
     const fields: string[] = []
     const values: unknown[] = []
@@ -292,8 +332,10 @@ router.put('/tasks/:id', async (req: Request, res: Response) => {
       const newIds = await setAssignees(Number(req.params.id), req.body.assigned_to_ids)
       await notifyNewAssignees(Number(req.params.id), rows[0].title, newIds, req.sdpUser!.id)
     }
-    if (req.body.status !== undefined) await syncParentStep(Number(req.params.id))
-    if (validationRequested) await requestValidation(Number(req.params.id), req.sdpUser!.id)
+    if (req.body.status !== undefined && current) {
+      await notifyStatusChange(Number(req.params.id), current.status, req.body.status, req.sdpUser!.id)
+      await syncParentStep(Number(req.params.id), req.sdpUser!.id)
+    }
     if (req.body.deadline !== undefined || req.body.priority !== undefined) {
       await pool.query('UPDATE task_checklist_items SET deadline = ?, priority = ? WHERE linked_task_id = ?', [rows[0].deadline, rows[0].priority, req.params.id])
     }
@@ -349,18 +391,14 @@ router.post('/tasks/:id/comments', async (req: Request, res: Response) => {
     const commentId = result.insertId
 
     const mentionIds: number[] = Array.isArray(mentioned_user_ids) ? mentioned_user_ids : []
-    const recipientIds = mentionIds.filter((id) => id !== authorId)
-    if (recipientIds.length > 0) {
-      const [task] = await pool.query<RowDataPacket[]>('SELECT title FROM tasks WHERE id = ?', [req.params.id])
-      const [contacts, authorContacts] = await Promise.all([getUserContacts(recipientIds), getUserContacts([authorId])])
-      const authorName = authorContacts[0] ? `${authorContacts[0].first_name} ${authorContacts[0].last_name}` : 'Un collègue'
-      for (const contact of contacts) {
-        await pool.query(
-          'INSERT INTO task_notifications (task_id, comment_id, recipient_user_id, from_user_id) VALUES (?, ?, ?, ?)',
-          [req.params.id, commentId, contact.id, authorId]
-        )
-        await sendMentionEmail(contact.email, authorName, task[0]?.title ?? '', body)
-      }
+    if (mentionIds.some((id) => id !== authorId)) {
+      const [[task]] = await pool.query<RowDataPacket[]>('SELECT title FROM tasks WHERE id = ?', [req.params.id])
+      const title = task?.title ?? ''
+      await notify({
+        taskId: Number(req.params.id), type: 'mention', recipientIds: mentionIds, fromUserId: authorId, commentId,
+        message: `${await userName(authorId)} vous a mentionné dans « ${title} »`,
+        email: { title: 'Vous avez été mentionné', taskTitle: title, details: body },
+      })
     }
     for (const userId of mentionIds) {
       await pool.query('INSERT IGNORE INTO task_comment_mentions (comment_id, mentioned_user_id) VALUES (?, ?)', [commentId, userId])
@@ -389,7 +427,7 @@ router.post('/tasks/:id/checklist', async (req: Request, res: Response) => {
       [req.params.id, label.trim(), count, toMysqlDatetime(deadline), priority || null]
     )
     await assignChecklistItem(result.insertId, team_id ?? null, Array.isArray(assigned_to_ids) ? assigned_to_ids : [], req.sdpUser!.id)
-    await syncTaskStatusWithChecklist(Number(req.params.id))
+    await syncTaskStatusWithChecklist(Number(req.params.id), req.sdpUser!.id)
     const [rows] = await pool.query<RowDataPacket[]>('SELECT * FROM task_checklist_items WHERE id = ?', [result.insertId])
     res.status(201).json(rows[0])
   } catch (err) {
@@ -414,7 +452,7 @@ router.put('/tasks/:id/checklist/:itemId', async (req: Request, res: Response) =
         done = undefined
         if (linked.status !== 'en_revision') {
           await pool.query("UPDATE tasks SET status = 'en_revision' WHERE id = ?", [linked.id])
-          await requestValidation(linked.id, req.sdpUser!.id)
+          await notifyStatusChange(linked.id, linked.status, 'en_revision', req.sdpUser!.id)
         }
       }
     }
@@ -430,10 +468,10 @@ router.put('/tasks/:id/checklist/:itemId', async (req: Request, res: Response) =
     const [[current]] = await pool.query<RowDataPacket[]>('SELECT linked_task_id FROM task_checklist_items WHERE id = ?', [req.params.itemId])
     if (current?.linked_task_id) {
       if (done !== undefined) {
-        await pool.query(
-          "UPDATE tasks SET status = CASE WHEN ? THEN 'termine' WHEN status = 'termine' THEN 'en_cours' ELSE status END WHERE id = ?",
-          [!!done, current.linked_task_id]
-        )
+        const [[linked]] = await pool.query<RowDataPacket[]>('SELECT status FROM tasks WHERE id = ?', [current.linked_task_id])
+        const next = done ? 'termine' : linked.status === 'termine' ? 'en_cours' : linked.status
+        await pool.query('UPDATE tasks SET status = ? WHERE id = ?', [next, current.linked_task_id])
+        await notifyStatusChange(current.linked_task_id, linked.status, next, req.sdpUser!.id)
       }
       if (label !== undefined) await pool.query('UPDATE tasks SET title = ? WHERE id = ?', [String(label).trim(), current.linked_task_id])
       if (req.body.deadline !== undefined) await pool.query('UPDATE tasks SET deadline = ? WHERE id = ?', [toMysqlDatetime(req.body.deadline), current.linked_task_id])
@@ -448,7 +486,7 @@ router.put('/tasks/:id/checklist/:itemId', async (req: Request, res: Response) =
         req.sdpUser!.id
       )
     }
-    await syncTaskStatusWithChecklist(Number(req.params.id))
+    await syncTaskStatusWithChecklist(Number(req.params.id), req.sdpUser!.id)
     const [rows] = await pool.query<RowDataPacket[]>('SELECT * FROM task_checklist_items WHERE id = ?', [req.params.itemId])
     if (!rows[0]) {
       res.status(404).json({ error: 'Item introuvable' })
@@ -469,7 +507,7 @@ router.delete('/tasks/:id/checklist/:itemId', async (req: Request, res: Response
     )
     await pool.query('DELETE FROM task_checklist_items WHERE id = ? AND task_id = ?', [req.params.itemId, req.params.id])
     if (item?.linked_task_id) await pool.query('DELETE FROM tasks WHERE id = ?', [item.linked_task_id])
-    await syncTaskStatusWithChecklist(Number(req.params.id))
+    await syncTaskStatusWithChecklist(Number(req.params.id), req.sdpUser!.id)
     const [[task]] = await pool.query<RowDataPacket[]>('SELECT * FROM tasks WHERE id = ?', [req.params.id])
     res.json({ success: true, task_status: task.status })
   } catch (err) {
