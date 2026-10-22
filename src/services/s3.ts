@@ -42,8 +42,25 @@ export async function uploadTaskAttachment(
   return { key }
 }
 
-export async function getTaskAttachmentUrl(key: string): Promise<string> {
-  return getSignedUrl(getClient(), new GetObjectCommand({ Bucket: BUCKET, Key: key }), { expiresIn: SIGNED_URL_TTL_SECONDS })
+// url : affichée dans le navigateur (aperçu image/PDF/vidéo) ; download_url : force le
+// téléchargement sous le nom d'origine.
+export async function getTaskAttachmentUrls(
+  attachment: { s3_key: string; filename: string; content_type: string }
+): Promise<{ url: string; download_url: string }> {
+  const filename = encodeURIComponent(attachment.filename)
+  const sign = (disposition: string) =>
+    getSignedUrl(
+      getClient(),
+      new GetObjectCommand({
+        Bucket: BUCKET,
+        Key: attachment.s3_key,
+        ResponseContentType: attachment.content_type,
+        ResponseContentDisposition: `${disposition}; filename*=UTF-8''${filename}`,
+      }),
+      { expiresIn: SIGNED_URL_TTL_SECONDS }
+    )
+  const [url, download_url] = await Promise.all([sign('inline'), sign('attachment')])
+  return { url, download_url }
 }
 
 export async function deleteTaskAttachment(key: string): Promise<void> {

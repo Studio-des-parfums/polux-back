@@ -77,6 +77,24 @@ export async function sendAssignedEmail(to: string, fromName: string, taskTitle:
   }
 }
 
+export async function sendValidationRequestEmail(to: string, fromName: string, taskTitle: string) {
+  const resend = getClient()
+  if (!resend) return
+  try {
+    await resend.emails.send({
+      from,
+      to,
+      subject: `${fromName} demande la validation de "${taskTitle}"`,
+      html: layout('Validation demandée', `
+        <p style="color: #5D4C3F; font-size: 14px; line-height: 1.6;"><strong style="color: #2B211B;">${fromName}</strong> a terminé l'étape que vous lui avez confiée et attend votre validation :</p>
+        ${taskLine(taskTitle)}
+      `),
+    })
+  } catch (err) {
+    console.error('sendValidationRequestEmail failed', err)
+  }
+}
+
 export async function sendDeadlineReminderEmail(to: string, taskTitle: string, isToday: boolean) {
   const resend = getClient()
   if (!resend) return

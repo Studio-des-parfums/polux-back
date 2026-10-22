@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express'
 import multer from 'multer'
 import { RowDataPacket, ResultSetHeader } from 'mysql2'
 import { pool } from '../db.js'
-import { uploadTaskAttachment, deleteTaskAttachment, getTaskAttachmentUrl } from '../services/s3.js'
+import { uploadTaskAttachment, deleteTaskAttachment, getTaskAttachmentUrls } from '../services/s3.js'
 
 const router = Router()
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } })
@@ -26,7 +26,7 @@ router.post('/tasks/:id/attachments', upload.array('files', 10), async (req: Req
       const [rows] = await pool.query<RowDataPacket[]>('SELECT * FROM task_attachments WHERE id = ?', [result.insertId])
       created.push(rows[0])
     }
-    const withUrls = await Promise.all(created.map(async (a) => ({ ...a, url: await getTaskAttachmentUrl(a.s3_key) })))
+    const withUrls = await Promise.all(created.map(async (a) => ({ ...a, ...(await getTaskAttachmentUrls({ s3_key: a.s3_key, filename: a.filename, content_type: a.content_type })) })))
     res.status(201).json(withUrls)
   } catch (err) {
     console.error(err)

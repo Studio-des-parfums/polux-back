@@ -4,6 +4,19 @@ import { pool } from '../db.js'
 
 const router = Router()
 
+const TEAM_COLUMNS = 'id, slug, name, color, manager_user_id, end_date, is_official, created_at'
+
+function isAdmin(req: Request): boolean {
+  return req.sdpUser?.role_name === 'admin'
+}
+
+async function teamWithMembers(teamId: number | string) {
+  const [rows] = await pool.query<RowDataPacket[]>(`SELECT ${TEAM_COLUMNS} FROM teams WHERE id = ?`, [teamId])
+  if (!rows[0]) return null
+  const [members] = await pool.query<RowDataPacket[]>('SELECT user_id FROM team_members WHERE team_id = ?', [teamId])
+  return { ...rows[0], member_ids: members.map((m) => m.user_id) }
+}
+
 function slugify(name: string): string {
   return name
     .trim()
@@ -18,7 +31,7 @@ function slugify(name: string): string {
 // côté serveur (voir DELETE /teams/:id), pas affiché au client.
 router.get('/teams', async (_req: Request, res: Response) => {
   try {
-    const [teams] = await pool.query<RowDataPacket[]>('SELECT id, slug, name, color, end_date, is_official, created_at FROM teams ORDER BY name')
+    const [teams] = await pool.query<RowDataPacket[]>('SELECT id, slug, name, color, manager_user_id, end_date, is_official, created_at FROM teams ORDER BY name')
     const [members] = await pool.query<RowDataPacket[]>('SELECT team_id, user_id FROM team_members')
     const result = teams.map((t) => ({
       ...t,
@@ -55,8 +68,37 @@ router.post('/teams', async (req: Request, res: Response) => {
     )
     await pool.query('INSERT IGNORE INTO team_members (team_id, user_id) VALUES (?, ?)', [result.insertId, creatorId])
 
-    const [rows] = await pool.query<RowDataPacket[]>('SELECT id, slug, name, color, end_date, is_official, created_at FROM teams WHERE id = ?', [result.insertId])
+    const [rows] = await pool.query<RowDataPacket[]>('SELECT id, slug, name, color, manager_user_id, end_date, is_official, created_at FROM teams WHERE id = ?', [result.insertId])
     res.status(201).json({ ...rows[0], member_ids: [creatorId] })
+  } catch (err: any) {
+    if (err.code === 'ER_DUP_ENTRY') {
+      res.status(409).json({ error: 'Une équipe avec un nom proche existe déjà' })
+      return
+    }
+    console.error(err)
+    res.status(500).json({ error: "Erreur lors de la création de l'équipe" })
+  }
+})
+
+// Équipe officielle (permanente, gérée depuis l'admin) : pas de date de fin, non supprimable hors admin.
+router.post('/teams/official', async (req: Request, res: Response) => {
+  try {
+    if (!isAdmin(req)) {
+      res.status(403).json({ error: 'Réservé aux administrateurs' })
+      return
+    }
+    const { name, color, manager_user_id } = req.body
+    const slug = typeof name === 'string' ? slugify(name) : ''
+    if (!slug) {
+      res.status(400).json({ error: "Le nom de l'équipe est requis" })
+      return
+    }
+    const [result] = await pool.query<ResultSetHeader>(
+      'INSERT INTO teams (slug, name, color, manager_user_id, is_official, created_by) VALUES (?, ?, ?, ?, TRUE, ?)',
+      [slug, name.trim(), color || '#6366f1', manager_user_id || null, req.sdpUser!.id]
+    )
+    if (manager_user_id) await pool.query('INSERT IGNORE INTO team_members (team_id, user_id) VALUES (?, ?)', [result.insertId, manager_user_id])
+    res.status(201).json(await teamWithMembers(result.insertId))
   } catch (err: any) {
     if (err.code === 'ER_DUP_ENTRY') {
       res.status(409).json({ error: 'Une équipe avec un nom proche existe déjà' })
@@ -92,22 +134,41 @@ router.delete('/teams/:id/members/:userId', async (req: Request, res: Response) 
   }
 })
 
-// Permet de prolonger (ou modifier) la date de fin d'un espace créé à la volée.
+// Date de fin d'un espace créé à la volée (prolonger) : tout utilisateur. Nom, couleur et
+// responsable : réservés à l'admin. Le slug ne change jamais (URLs, équipes des utilisateurs).
 router.patch('/teams/:id', async (req: Request, res: Response) => {
   try {
-    const { end_date } = req.body
-    if (end_date === undefined) {
-      res.status(400).json({ error: 'end_date requis' })
+    const { end_date, name, color, manager_user_id } = req.body
+    const fields: string[] = []
+    const values: unknown[] = []
+    if (end_date !== undefined) { fields.push('end_date = ?'); values.push(end_date) }
+    const adminFields = name !== undefined || color !== undefined || manager_user_id !== undefined
+    if (adminFields && !isAdmin(req)) {
+      res.status(403).json({ error: 'Réservé aux administrateurs' })
       return
     }
-    await pool.query('UPDATE teams SET end_date = ? WHERE id = ?', [end_date, req.params.id])
-    const [rows] = await pool.query<RowDataPacket[]>('SELECT id, slug, name, color, end_date, is_official, created_at FROM teams WHERE id = ?', [req.params.id])
-    if (!rows[0]) {
+    if (name !== undefined) {
+      if (!String(name).trim()) {
+        res.status(400).json({ error: "Le nom de l'équipe est requis" })
+        return
+      }
+      fields.push('name = ?'); values.push(String(name).trim())
+    }
+    if (color !== undefined) { fields.push('color = ?'); values.push(color) }
+    if (manager_user_id !== undefined) { fields.push('manager_user_id = ?'); values.push(manager_user_id || null) }
+    if (fields.length === 0) {
+      res.status(400).json({ error: 'Aucune modification' })
+      return
+    }
+    await pool.query(`UPDATE teams SET ${fields.join(', ')} WHERE id = ?`, [...values, req.params.id])
+    // Le responsable fait forcément partie de l'espace.
+    if (manager_user_id) await pool.query('INSERT IGNORE INTO team_members (team_id, user_id) VALUES (?, ?)', [req.params.id, manager_user_id])
+    const team = await teamWithMembers(Number(req.params.id))
+    if (!team) {
       res.status(404).json({ error: 'Équipe introuvable' })
       return
     }
-    const [members] = await pool.query<RowDataPacket[]>('SELECT user_id FROM team_members WHERE team_id = ?', [req.params.id])
-    res.json({ ...rows[0], member_ids: members.map((m) => m.user_id) })
+    res.json(team)
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: "Erreur lors de la mise à jour de l'équipe" })
@@ -115,7 +176,8 @@ router.patch('/teams/:id', async (req: Request, res: Response) => {
 })
 
 // Supprime l'équipe et, par cascade (voir migrations/001_init.sql), ses tâches,
-// commentaires, pièces jointes et notifications associées — réservé au créateur.
+// commentaires, pièces jointes et notifications associées — réservé au créateur (ou à l'admin,
+// seul à pouvoir supprimer une équipe officielle).
 router.delete('/teams/:id', async (req: Request, res: Response) => {
   try {
     const [rows] = await pool.query<RowDataPacket[]>('SELECT created_by, is_official FROM teams WHERE id = ?', [req.params.id])
@@ -123,11 +185,11 @@ router.delete('/teams/:id', async (req: Request, res: Response) => {
       res.status(404).json({ error: 'Équipe introuvable' })
       return
     }
-    if (rows[0].is_official) {
+    if (rows[0].is_official && !isAdmin(req)) {
       res.status(403).json({ error: 'Cette équipe est officielle et ne peut pas être supprimée' })
       return
     }
-    if (rows[0].created_by !== req.sdpUser!.id) {
+    if (!rows[0].is_official && rows[0].created_by !== req.sdpUser!.id && !isAdmin(req)) {
       res.status(403).json({ error: 'Seule la personne ayant créé cette équipe peut la supprimer' })
       return
     }
