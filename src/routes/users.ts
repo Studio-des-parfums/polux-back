@@ -1,6 +1,5 @@
 import { Router, Request, Response } from 'express'
-import { RowDataPacket } from 'mysql2'
-import { sdpPool } from '../db.js'
+import { listActiveUsers } from '../services/dashboardUsers.js'
 
 const router = Router()
 
@@ -8,10 +7,7 @@ const router = Router()
 // peupler les sélecteurs d'assignation/mention côté front Polux.
 router.get('/users', async (_req: Request, res: Response) => {
   try {
-    const [rows] = await sdpPool.query<RowDataPacket[]>(
-      'SELECT id, email, first_name, last_name FROM users WHERE is_active = TRUE ORDER BY first_name, last_name'
-    )
-    res.json(rows)
+    res.json(await listActiveUsers())
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: 'Erreur lors de la récupération des utilisateurs' })

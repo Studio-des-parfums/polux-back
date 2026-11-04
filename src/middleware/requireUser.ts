@@ -1,14 +1,7 @@
 import { Request, Response, NextFunction } from 'express'
-import { RowDataPacket } from 'mysql2'
-import { sdpPool } from '../db.js'
+import { findActiveUserByEmail, type SdpUser } from '../services/dashboardUsers.js'
 
-export interface SdpUser {
-  id: number
-  email: string
-  first_name: string
-  last_name: string
-  role_name: string
-}
+export type { SdpUser }
 
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
@@ -20,7 +13,7 @@ declare global {
 }
 
 // Même mécanisme que sdp-dashboard/server (header x-user-email, pas de JWT dans ce
-// système) — vérifié ici contre la base sdp_dashboard en lecture seule.
+// système) — vérifié via l'API interne de sdp-dashboard.
 export async function requireUser(req: Request, res: Response, next: NextFunction) {
   try {
     const email = req.headers['x-user-email'] as string | undefined
@@ -29,14 +22,7 @@ export async function requireUser(req: Request, res: Response, next: NextFunctio
       return
     }
 
-    const [rows] = await sdpPool.query<RowDataPacket[]>(
-      `SELECT u.id, u.email, u.first_name, u.last_name, r.name as role_name
-       FROM users u
-       JOIN roles r ON r.id = u.role_id
-       WHERE u.email = ? AND u.is_active = TRUE`,
-      [email]
-    )
-    const user = rows[0] as SdpUser | undefined
+    const user = await findActiveUserByEmail(email)
     if (!user) {
       res.status(401).json({ error: 'Authentification requise' })
       return

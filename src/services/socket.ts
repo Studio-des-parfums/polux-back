@@ -1,7 +1,6 @@
 import type { Server as HttpServer } from 'http'
 import { Server as SocketIOServer } from 'socket.io'
-import { RowDataPacket } from 'mysql2'
-import { sdpPool } from '../db.js'
+import { findActiveUserByEmail } from './dashboardUsers.js'
 
 // Temps réel des notifications Polux : chaque onglet ouvert se connecte avec l'email de
 // l'utilisateur (même identité que le header x-user-email), et rejoint la room "user:<id>".
@@ -16,12 +15,12 @@ export function initSocket(httpServer: HttpServer) {
       return
     }
     try {
-      const [rows] = await sdpPool.query<RowDataPacket[]>('SELECT id FROM users WHERE email = ? AND is_active = TRUE', [email])
-      if (!rows[0]) {
+      const user = await findActiveUserByEmail(email)
+      if (!user) {
         socket.disconnect(true)
         return
       }
-      socket.join(`user:${rows[0].id}`)
+      socket.join(`user:${user.id}`)
     } catch (err) {
       console.error('[socket] connexion refusée', err)
       socket.disconnect(true)

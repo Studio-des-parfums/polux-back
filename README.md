@@ -14,7 +14,7 @@ Backend de Polux (gestion de projets/tâches), séparé de `sdp-dashboard`. Expr
 
 ```sh
 npm install
-cp .env.example .env   # renseigner DB_*, SDP_DB_*, AWS_*
+cp .env.example .env   # renseigner DB_*, DASHBOARD_API_URL, INTERNAL_API_KEY, AWS_*
 npm run migrate        # crée la base `polux` et les tables
 npm run dev             # démarre sur le port 3002
 ```
