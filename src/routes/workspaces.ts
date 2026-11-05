@@ -1,6 +1,8 @@
 import { Router, Request, Response } from 'express'
 import { RowDataPacket, ResultSetHeader } from 'mysql2'
 import { pool } from '../db.js'
+import { deleteTaskAttachment } from '../services/s3.js'
+import { DEFAULT_WORKSPACE_SLUG } from '../middleware/requireWorkspace.js'
 
 // Gestion des espaces Polux — réservée aux admins. Monté hors de requireWorkspace : ces
 // routes ne s'exécutent pas « dans » un espace.
@@ -105,6 +107,36 @@ router.patch('/workspaces/:slug', async (req: Request, res: Response) => {
   } catch (err) {
     console.error(err)
     res.status(500).json({ error: "Erreur lors de la mise à jour de l'espace" })
+  }
+})
+
+// Supprime un espace et, par cascade (migration 023), ses équipes, tâches, leads et accès.
+// Le Polux principal ne peut pas être supprimé. Les fichiers S3 des pièces jointes sont
+// effacés ensuite (best effort : une erreur S3 ne bloque pas la suppression).
+router.delete('/workspaces/:slug', async (req: Request, res: Response) => {
+  if (!isAdmin(req)) {
+    res.status(403).json({ error: 'Réservé aux administrateurs' })
+    return
+  }
+  if (req.params.slug === DEFAULT_WORKSPACE_SLUG) {
+    res.status(400).json({ error: "Le Polux principal ne peut pas être supprimé" })
+    return
+  }
+  try {
+    const [[workspace]] = await pool.query<RowDataPacket[]>('SELECT id FROM workspaces WHERE slug = ?', [req.params.slug])
+    if (!workspace) {
+      res.json({ success: true })
+      return
+    }
+    const [attachments] = await pool.query<RowDataPacket[]>(
+      'SELECT a.s3_key FROM task_attachments a JOIN tasks t ON t.id = a.task_id WHERE t.workspace_id = ?', [workspace.id]
+    )
+    await pool.query('DELETE FROM workspaces WHERE id = ?', [workspace.id])
+    for (const a of attachments) await deleteTaskAttachment(a.s3_key).catch((err) => console.error(err))
+    res.json({ success: true })
+  } catch (err) {
+    console.error(err)
+    res.status(500).json({ error: "Erreur lors de la suppression de l'espace" })
   }
 })
 
