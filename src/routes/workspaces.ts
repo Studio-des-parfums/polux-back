@@ -27,12 +27,14 @@ router.get('/workspaces', async (req: Request, res: Response) => {
 // Crée un espace. Le slug est celui du projet sdp_dashboard créé juste avant par l'admin
 // (c'est lui qui porte les accès). `copy_teams_from` : slug d'un espace dont on reprend les
 // équipes (nom, couleur, responsable, membres) — copiées, donc indépendantes ensuite.
+// `copy_team_ids` (optionnel) : seulement ces équipes de l'espace source ; absent = toutes.
 router.post('/workspaces', async (req: Request, res: Response) => {
   if (!isAdmin(req)) {
     res.status(403).json({ error: 'Réservé aux administrateurs' })
     return
   }
-  const { slug, name, color, copy_teams_from } = req.body ?? {}
+  const { slug, name, color, copy_teams_from, copy_team_ids } = req.body ?? {}
+  const teamIds: number[] | null = Array.isArray(copy_team_ids) ? copy_team_ids.map(Number).filter(Number.isInteger) : null
   if (typeof slug !== 'string' || !/^[a-z0-9-]+$/.test(slug) || typeof name !== 'string' || !name.trim()) {
     res.status(400).json({ error: 'Nom et slug valides requis' })
     return
@@ -47,13 +49,14 @@ router.post('/workspaces', async (req: Request, res: Response) => {
     )
     const workspaceId = result.insertId
 
-    if (copy_teams_from) {
+    if (copy_teams_from && (teamIds === null || teamIds.length > 0)) {
       const [[source]] = await conn.query<RowDataPacket[]>('SELECT id FROM workspaces WHERE slug = ?', [copy_teams_from])
       if (!source) throw Object.assign(new Error('Espace source introuvable'), { status: 400 })
       // Copies non officielles : les équipes officielles restent liées au Polux principal
       // (synchronisées avec les équipes des utilisateurs du dashboard).
       const [teams] = await conn.query<RowDataPacket[]>(
-        'SELECT id, slug, name, color, manager_user_id FROM teams WHERE workspace_id = ?', [source.id]
+        `SELECT id, slug, name, color, manager_user_id FROM teams WHERE workspace_id = ?${teamIds ? ' AND id IN (?)' : ''}`,
+        teamIds ? [source.id, teamIds] : [source.id]
       )
       for (const team of teams) {
         const [inserted] = await conn.query<ResultSetHeader>(
