@@ -52,6 +52,16 @@ export async function listActiveUsers(): Promise<UserContact[]> {
   return readJson<UserContact[]>(await dashboardGet('/users'))
 }
 
+export interface UserWithStatus extends UserContact {
+  is_active: boolean
+}
+
+// Tous les utilisateurs, anciens membres compris : le front en a besoin pour afficher
+// l'auteur d'une action passée même après son départ.
+export async function listAllUsers(): Promise<UserWithStatus[]> {
+  return readJson<UserWithStatus[]>(await dashboardGet('/users?all=1'))
+}
+
 export async function getUsersByIds(ids: number[]): Promise<UserContact[]> {
   if (ids.length === 0) return []
   return readJson<UserContact[]>(await dashboardGet(`/users?ids=${ids.join(',')}`))
