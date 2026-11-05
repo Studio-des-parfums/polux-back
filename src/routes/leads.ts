@@ -1,8 +1,12 @@
 import { Router, Request, Response } from 'express'
 import { RowDataPacket, ResultSetHeader } from 'mysql2'
 import { pool } from '../db.js'
+import { belongsToWorkspace } from '../middleware/requireWorkspace.js'
 
 const router = Router()
+
+// Toute route /leads/:id ne s'applique qu'aux leads de l'espace courant.
+router.param('id', belongsToWorkspace('leads'))
 
 // mysql2 n'accepte pas le format ISO 8601 pour une colonne DATETIME — conversion en
 // 'YYYY-MM-DD HH:MM:SS', même convention que tasks.ts.
@@ -24,9 +28,9 @@ async function attachInteractions(leads: RowDataPacket[]) {
   }))
 }
 
-router.get('/leads', async (_req: Request, res: Response) => {
+router.get('/leads', async (req: Request, res: Response) => {
   try {
-    const [rows] = await pool.query<RowDataPacket[]>('SELECT * FROM leads ORDER BY created_at DESC')
+    const [rows] = await pool.query<RowDataPacket[]>('SELECT * FROM leads WHERE workspace_id = ? ORDER BY created_at DESC', [req.workspace!.id])
     res.json(await attachInteractions(rows))
   } catch (err) {
     console.error(err)
@@ -46,12 +50,12 @@ router.post('/leads', async (req: Request, res: Response) => {
       return
     }
     const [result] = await pool.query<ResultSetHeader>(
-      `INSERT INTO leads (contact_type, last_name, first_name, phone, email, company, info,
+      `INSERT INTO leads (workspace_id, contact_type, last_name, first_name, phone, email, company, info,
          project_name, project_date, first_deposit_date, second_deposit_date, status,
          call_date, next_follow_up_at, assigned_to_id, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        contact_type || 'particulier', last_name.trim(), first_name.trim(), phone.trim(), email?.trim() || '',
+        req.workspace!.id, contact_type || 'particulier', last_name.trim(), first_name.trim(), phone.trim(), email?.trim() || '',
         contact_type === 'professionnel' ? (company?.trim() || null) : null, info ?? '',
         project_name?.trim() || '', toMysqlDatetime(project_date), toMysqlDatetime(first_deposit_date), toMysqlDatetime(second_deposit_date),
         status || 'nouveau', toMysqlDatetime(call_date), toMysqlDatetime(next_follow_up_at), assigned_to_id || null, req.sdpUser!.id,
@@ -127,9 +131,9 @@ router.post('/leads/:id/interactions', async (req: Request, res: Response) => {
   }
 })
 
-router.get('/leads/access', async (_req: Request, res: Response) => {
+router.get('/leads/access', async (req: Request, res: Response) => {
   try {
-    const [rows] = await pool.query<RowDataPacket[]>('SELECT user_id FROM leads_access')
+    const [rows] = await pool.query<RowDataPacket[]>('SELECT user_id FROM leads_access WHERE workspace_id = ?', [req.workspace!.id])
     res.json(rows.map((r) => r.user_id))
   } catch (err) {
     console.error(err)
@@ -144,7 +148,7 @@ router.post('/leads/access', async (req: Request, res: Response) => {
       res.status(400).json({ error: 'user_id requis' })
       return
     }
-    await pool.query('INSERT IGNORE INTO leads_access (user_id) VALUES (?)', [user_id])
+    await pool.query('INSERT IGNORE INTO leads_access (workspace_id, user_id) VALUES (?, ?)', [req.workspace!.id, user_id])
     res.status(201).json({ success: true })
   } catch (err) {
     console.error(err)
@@ -154,7 +158,7 @@ router.post('/leads/access', async (req: Request, res: Response) => {
 
 router.delete('/leads/access/:userId', async (req: Request, res: Response) => {
   try {
-    await pool.query('DELETE FROM leads_access WHERE user_id = ?', [req.params.userId])
+    await pool.query('DELETE FROM leads_access WHERE workspace_id = ? AND user_id = ?', [req.workspace!.id, req.params.userId])
     res.json({ success: true })
   } catch (err) {
     console.error(err)

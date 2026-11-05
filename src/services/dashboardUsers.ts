@@ -66,3 +66,17 @@ export async function getUsersByIds(ids: number[]): Promise<UserContact[]> {
   if (ids.length === 0) return []
   return readJson<UserContact[]>(await dashboardGet(`/users?ids=${ids.join(',')}`))
 }
+
+// Accès d'un utilisateur au projet sdp_dashboard d'un espace Polux — même cache court que
+// findActiveUserByEmail (un retrait d'accès peut rester accepté jusqu'à 30 secondes).
+const accessCache = new Map<string, { ok: boolean; expiresAt: number }>()
+
+export async function hasProjectAccess(userId: number, projectSlug: string): Promise<boolean> {
+  const cacheKey = `${userId}:${projectSlug}`
+  const cached = accessCache.get(cacheKey)
+  if (cached && cached.expiresAt > Date.now()) return cached.ok
+  const res = await dashboardGet(`/users/${userId}/project-access?slug=${encodeURIComponent(projectSlug)}`)
+  const { has_access } = await readJson<{ has_access: boolean }>(res)
+  accessCache.set(cacheKey, { ok: has_access, expiresAt: Date.now() + CACHE_TTL_MS })
+  return has_access
+}

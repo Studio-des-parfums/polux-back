@@ -3,8 +3,19 @@ import { RowDataPacket, ResultSetHeader } from 'mysql2'
 import { pool } from '../db.js'
 import { getTaskAttachmentUrls } from '../services/s3.js'
 import { notify, userName } from '../services/notify.js'
+import { belongsToWorkspace } from '../middleware/requireWorkspace.js'
 
 const router = Router()
+
+// Toute route /tasks/:id ne s'applique qu'aux tâches de l'espace courant.
+router.param('id', belongsToWorkspace('tasks'))
+
+// Une équipe ou un lead référencé par une tâche doit appartenir au même espace qu'elle.
+async function inWorkspace(table: 'teams' | 'leads', id: unknown, workspaceId: number): Promise<boolean> {
+  if (id == null || id === '' || id === 0) return true
+  const [rows] = await pool.query<RowDataPacket[]>(`SELECT 1 FROM ${table} WHERE id = ? AND workspace_id = ?`, [id, workspaceId])
+  return rows.length > 0
+}
 
 // mysql2 n'accepte pas le format ISO 8601 ('2026-10-16T00:00:00.000Z') pour une colonne
 // DATETIME — on le convertit en 'YYYY-MM-DD HH:MM:SS' attendu par MySQL.
@@ -168,8 +179,11 @@ async function syncParentStep(taskId: number, actorId: number | null = null) {
 // Crée, met à jour ou supprime la tâche liée à une étape selon l'assignation demandée.
 // Sans équipe ni personne, l'étape redevient une simple case à cocher.
 async function assignChecklistItem(itemId: number, teamId: number | null, assigneeIds: number[], authorId: number) {
-  const [[item]] = await pool.query<RowDataPacket[]>('SELECT * FROM task_checklist_items WHERE id = ?', [itemId])
+  const [[item]] = await pool.query<RowDataPacket[]>(
+    'SELECT c.*, t.workspace_id FROM task_checklist_items c JOIN tasks t ON t.id = c.task_id WHERE c.id = ?', [itemId]
+  )
   if (!item) return
+  if (!(await inWorkspace('teams', teamId, item.workspace_id))) throw new Error('Équipe hors de l\'espace de la tâche')
   if (!teamId && assigneeIds.length === 0) {
     if (item.linked_task_id) {
       await pool.query('UPDATE task_checklist_items SET linked_task_id = NULL WHERE id = ?', [itemId])
@@ -185,10 +199,11 @@ async function assignChecklistItem(itemId: number, teamId: number | null, assign
     await pool.query('UPDATE tasks SET team_id = ? WHERE id = ?', [teamId || null, linkedId])
   } else {
     const [[parent]] = await pool.query<RowDataPacket[]>('SELECT * FROM tasks WHERE id = ?', [item.task_id])
+    // L'étape confiée reste dans l'espace de la tâche parente.
     const [result] = await pool.query<ResultSetHeader>(
-      `INSERT INTO tasks (project_name, team_id, lead_id, title, description, created_by, owner_id, priority, status, deadline)
-       VALUES (?, ?, ?, ?, '', ?, NULL, ?, ?, ?)`,
-      [parent.project_name, teamId || null, parent.lead_id, item.label, authorId, item.priority ?? parent.priority, item.done ? 'termine' : 'a_faire', item.deadline ?? parent.deadline]
+      `INSERT INTO tasks (workspace_id, project_name, team_id, lead_id, title, description, created_by, owner_id, priority, status, deadline)
+       VALUES (?, ?, ?, ?, ?, '', ?, NULL, ?, ?, ?)`,
+      [parent.workspace_id, parent.project_name, teamId || null, parent.lead_id, item.label, authorId, item.priority ?? parent.priority, item.done ? 'termine' : 'a_faire', item.deadline ?? parent.deadline]
     )
     linkedId = result.insertId
     await pool.query('UPDATE task_checklist_items SET linked_task_id = ? WHERE id = ?', [linkedId, itemId])
@@ -233,7 +248,7 @@ router.get('/tasks', async (req: Request, res: Response) => {
     const me = req.sdpUser!.id
     const [rows] = await pool.query<RowDataPacket[]>(
       `SELECT * FROM tasks t
-       WHERE t.owner_id = ?
+       WHERE t.workspace_id = ? AND (t.owner_id = ?
           OR (t.owner_id IS NULL AND (
                NOT EXISTS (SELECT 1 FROM task_assignees a WHERE a.task_id = t.id)
                OR t.created_by = ?
@@ -247,9 +262,9 @@ router.get('/tasks', async (req: Request, res: Response) => {
                    )
                  )
                )
-             ))
+             )))
        ORDER BY t.deadline IS NULL, t.deadline`,
-      [me, me, me, me, me]
+      [req.workspace!.id, me, me, me, me, me]
     )
     res.json(await attachRelations(rows))
   } catch (err) {
@@ -265,14 +280,19 @@ router.post('/tasks', async (req: Request, res: Response) => {
       res.status(400).json({ error: 'title est requis' })
       return
     }
+    const workspaceId = req.workspace!.id
+    if (!(await inWorkspace('teams', team_id, workspaceId)) || !(await inWorkspace('leads', lead_id, workspaceId))) {
+      res.status(400).json({ error: "L'équipe ou le lead n'appartient pas à cet espace" })
+      return
+    }
     // Sans équipe, la tâche n'est personnelle (visible du seul créateur) que si personne
     // d'autre n'y est assigné — sinon les autres assignés ne la verraient jamais.
     const assignsOthers = Array.isArray(assigned_to_ids) && assigned_to_ids.some((id: number) => id !== req.sdpUser!.id)
     const ownerId = team_id || assignsOthers ? null : req.sdpUser!.id
     const [result] = await pool.query<ResultSetHeader>(
-      `INSERT INTO tasks (project_name, team_id, lead_id, title, description, created_by, owner_id, priority, color, start_date, deadline)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [project_name?.trim() || null, team_id || null, lead_id || null, title.trim(), description ?? '', req.sdpUser!.id, ownerId, priority || 'moyenne', color || null, toMysqlDatetime(start_date), toMysqlDatetime(deadline)]
+      `INSERT INTO tasks (workspace_id, project_name, team_id, lead_id, title, description, created_by, owner_id, priority, color, start_date, deadline)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [workspaceId, project_name?.trim() || null, team_id || null, lead_id || null, title.trim(), description ?? '', req.sdpUser!.id, ownerId, priority || 'moyenne', color || null, toMysqlDatetime(start_date), toMysqlDatetime(deadline)]
     )
     // Une tâche personnelle n'a pas d'équipe à notifier : on s'assigne automatiquement
     // soi-même, pour que l'affichage (avatars, filtre "mes tâches") reste cohérent.
@@ -299,6 +319,10 @@ const DATETIME_FIELDS = new Set(['start_date', 'deadline'])
 
 router.put('/tasks/:id', async (req: Request, res: Response) => {
   try {
+    if (!(await inWorkspace('leads', req.body.lead_id, req.workspace!.id))) {
+      res.status(400).json({ error: "Ce lead n'appartient pas à cet espace" })
+      return
+    }
     const [[current]] = await pool.query<RowDataPacket[]>('SELECT created_by, status FROM tasks WHERE id = ?', [req.params.id])
     // Seul le demandeur peut terminer une étape confiée ; pour les autres, "terminé" = demande de validation.
     if (req.body.status === 'termine' && current && current.created_by !== req.sdpUser!.id && (await isDelegatedStep(Number(req.params.id)))) {

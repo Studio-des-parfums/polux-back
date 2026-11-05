@@ -3,6 +3,8 @@ import express from 'express'
 import { createServer } from 'http'
 import cors from 'cors'
 import { requireUser } from './middleware/requireUser.js'
+import { requireWorkspace } from './middleware/requireWorkspace.js'
+import workspaceRoutes from './routes/workspaces.js'
 import teamRoutes from './routes/teams.js'
 import taskRoutes from './routes/tasks.js'
 import attachmentRoutes from './routes/attachments.js'
@@ -27,11 +29,15 @@ app.get('/health', (_req, res) => {
 // Toutes les routes /api nécessitent une identité valide (header x-user-email, vérifié
 // contre la base sdp_dashboard — voir middleware/requireUser.ts).
 app.use('/api', requireUser)
+// Routes transverses (tous espaces confondus) : utilisateurs, notifications, gestion des espaces.
+app.use('/api', userRoutes)
+app.use('/api', notificationRoutes)
+app.use('/api', workspaceRoutes)
+// Routes « dans » un espace Polux (header x-polux-workspace, 'polux' par défaut).
+app.use('/api', requireWorkspace)
 app.use('/api', teamRoutes)
 app.use('/api', taskRoutes)
 app.use('/api', attachmentRoutes)
-app.use('/api', notificationRoutes)
-app.use('/api', userRoutes)
 app.use('/api', leadRoutes)
 
 startReminderCron()

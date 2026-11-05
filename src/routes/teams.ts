@@ -1,8 +1,12 @@
 import { Router, Request, Response } from 'express'
 import { RowDataPacket, ResultSetHeader } from 'mysql2'
 import { pool } from '../db.js'
+import { belongsToWorkspace } from '../middleware/requireWorkspace.js'
 
 const router = Router()
+
+// Toute route /teams/:id ne s'applique qu'aux équipes de l'espace courant.
+router.param('id', belongsToWorkspace('teams'))
 
 const TEAM_COLUMNS = 'id, slug, name, color, manager_user_id, end_date, is_official, created_at'
 
@@ -29,10 +33,12 @@ function slugify(name: string): string {
 
 // created_by n'est jamais exposé dans l'API : la restriction de suppression se fait
 // côté serveur (voir DELETE /teams/:id), pas affiché au client.
-router.get('/teams', async (_req: Request, res: Response) => {
+router.get('/teams', async (req: Request, res: Response) => {
   try {
-    const [teams] = await pool.query<RowDataPacket[]>('SELECT id, slug, name, color, manager_user_id, end_date, is_official, created_at FROM teams ORDER BY name')
-    const [members] = await pool.query<RowDataPacket[]>('SELECT team_id, user_id FROM team_members')
+    const [teams] = await pool.query<RowDataPacket[]>(`SELECT ${TEAM_COLUMNS} FROM teams WHERE workspace_id = ? ORDER BY name`, [req.workspace!.id])
+    const [members] = await pool.query<RowDataPacket[]>(
+      'SELECT tm.team_id, tm.user_id FROM team_members tm JOIN teams t ON t.id = tm.team_id WHERE t.workspace_id = ?', [req.workspace!.id]
+    )
     const result = teams.map((t) => ({
       ...t,
       member_ids: members.filter((m) => m.team_id === t.id).map((m) => m.user_id),
@@ -63,8 +69,8 @@ router.post('/teams', async (req: Request, res: Response) => {
 
     const creatorId = req.sdpUser!.id
     const [result] = await pool.query<ResultSetHeader>(
-      'INSERT INTO teams (slug, name, color, end_date, created_by) VALUES (?, ?, ?, ?, ?)',
-      [slug, name.trim(), color || '#6366f1', end_date, creatorId]
+      'INSERT INTO teams (workspace_id, slug, name, color, end_date, created_by) VALUES (?, ?, ?, ?, ?, ?)',
+      [req.workspace!.id, slug, name.trim(), color || '#6366f1', end_date, creatorId]
     )
     await pool.query('INSERT IGNORE INTO team_members (team_id, user_id) VALUES (?, ?)', [result.insertId, creatorId])
 
@@ -94,8 +100,8 @@ router.post('/teams/official', async (req: Request, res: Response) => {
       return
     }
     const [result] = await pool.query<ResultSetHeader>(
-      'INSERT INTO teams (slug, name, color, manager_user_id, is_official, created_by) VALUES (?, ?, ?, ?, TRUE, ?)',
-      [slug, name.trim(), color || '#6366f1', manager_user_id || null, req.sdpUser!.id]
+      'INSERT INTO teams (workspace_id, slug, name, color, manager_user_id, is_official, created_by) VALUES (?, ?, ?, ?, ?, TRUE, ?)',
+      [req.workspace!.id, slug, name.trim(), color || '#6366f1', manager_user_id || null, req.sdpUser!.id]
     )
     if (manager_user_id) await pool.query('INSERT IGNORE INTO team_members (team_id, user_id) VALUES (?, ?)', [result.insertId, manager_user_id])
     res.status(201).json(await teamWithMembers(result.insertId))

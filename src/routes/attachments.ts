@@ -3,11 +3,13 @@ import multer from 'multer'
 import { RowDataPacket, ResultSetHeader } from 'mysql2'
 import { pool } from '../db.js'
 import { uploadTaskAttachment, deleteTaskAttachment, getTaskAttachmentUrls } from '../services/s3.js'
+import { belongsToWorkspace } from '../middleware/requireWorkspace.js'
 
 const router = Router()
+const taskInWorkspace = belongsToWorkspace('tasks')
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } })
 
-router.post('/tasks/:id/attachments', upload.array('files', 10), async (req: Request, res: Response) => {
+router.post('/tasks/:id/attachments', (req, res, next) => taskInWorkspace(req, res, next, String(req.params.id)), upload.array('files', 10), async (req: Request, res: Response) => {
   try {
     const files = req.files as Express.Multer.File[] | undefined
     if (!files || files.length === 0) {
@@ -36,7 +38,10 @@ router.post('/tasks/:id/attachments', upload.array('files', 10), async (req: Req
 
 router.delete('/attachments/:id', async (req: Request, res: Response) => {
   try {
-    const [rows] = await pool.query<RowDataPacket[]>('SELECT * FROM task_attachments WHERE id = ?', [req.params.id])
+    const [rows] = await pool.query<RowDataPacket[]>(
+      'SELECT a.* FROM task_attachments a JOIN tasks t ON t.id = a.task_id WHERE a.id = ? AND t.workspace_id = ?',
+      [req.params.id, req.workspace!.id]
+    )
     const attachment = rows[0]
     if (!attachment) {
       res.status(404).json({ error: 'Pièce jointe introuvable' })

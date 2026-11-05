@@ -7,9 +7,10 @@ const router = Router()
 router.get('/notifications', async (req: Request, res: Response) => {
   try {
     const [rows] = await pool.query<RowDataPacket[]>(
-      `SELECT n.*, t.title as task_title
+      `SELECT n.*, t.title as task_title, w.slug as workspace_slug
        FROM task_notifications n
        JOIN tasks t ON t.id = n.task_id
+       JOIN workspaces w ON w.id = t.workspace_id
        WHERE n.recipient_user_id = ? AND n.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
        ORDER BY n.created_at DESC
        LIMIT 50`,
