@@ -8,12 +8,15 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 // plutôt que par une URL publique fixe.
 const BUCKET = process.env.AWS_S3_BUCKET || ''
 const REGION = process.env.AWS_S3_REGION || 'eu-west-3'
+// Stockage compatible S3 autre qu'AWS (Cloudflare R2) : endpoint du compte, région 'auto'.
+const ENDPOINT = process.env.AWS_S3_ENDPOINT || ''
 const PREFIX = 'polux/'
 const SIGNED_URL_TTL_SECONDS = 3600
 
 function getClient(): S3Client {
   return new S3Client({
     region: REGION,
+    ...(ENDPOINT ? { endpoint: ENDPOINT, forcePathStyle: true } : {}),
     credentials: {
       accessKeyId: process.env.AWS_ACCESS_KEY_ID || '',
       secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || '',
